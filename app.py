@@ -336,18 +336,9 @@ application.add_handler(CommandHandler("online", online))
 application.add_handler(CommandHandler("shutdown", shutdown))
 application.add_handler(CommandHandler("addadmin", addadmin))
 
-def run_bot():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(application.run_polling())
-    except Exception as e:
-        logger.error(f"Bot polling error: {e}")
-    finally:
-        loop.close()
 
-thread = threading.Thread(target=run_bot, daemon=True)
-thread.start()
+def start_flask():
+    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
 
 # ---------- Flask endpoints ----------
 @app.route('/api/request_code', methods=['POST'])
@@ -440,4 +431,10 @@ def online_list():
     return jsonify({'online': [{'username': c[0], 'ip': c[1], 'last_seen': c[2]} for c in clients]})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    # Запускаем Flask в отдельном потоке
+    flask_thread = threading.Thread(target=start_flask, daemon=True)
+    flask_thread.start()
+
+    # Бот работает в главном потоке (корректный asyncio)
+    logger.info("Starting bot polling in main thread...")
+    application.run_polling()  # синхронный метод, блокирует главный поток
