@@ -12,7 +12,7 @@ from flask_cors import CORS
 import threading
 import asyncio
 import requests as req
-from telegram import Update
+from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ---------- Настройка логирования ----------
@@ -27,8 +27,12 @@ app = Flask(__name__)
 CORS(app)
 
 # ---------- База данных ----------
+HOME = os.path.expanduser("~")
+DB_PATH = os.path.join(HOME, "goida_users.db")
+os.makedirs(os.path.dirname(DB_PATH) if os.path.dirname(DB_PATH) else HOME, exist_ok=True)
+
 def init_db():
-    conn = sqlite3.connect('users.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,6 +58,14 @@ def init_db():
         expires_at REAL,
         PRIMARY KEY (username, code)
     )''')
+    # Новая таблица для сборок
+    c.execute('''CREATE TABLE IF NOT EXISTS builds (
+        name TEXT PRIMARY KEY,
+        url TEXT,
+        version TEXT,
+        hash TEXT,
+        updated_at TEXT
+    )''')
     conn.commit()
     conn.close()
 
@@ -61,10 +73,9 @@ init_db()
 
 def load_admins():
     global ADMIN_IDS
-    # Захардкоженный админ
     hardcoded = 5287355502
     ADMIN_IDS = [hardcoded]
-    conn = sqlite3.connect('users.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT telegram_id FROM admins')
     rows = c.fetchall()
@@ -77,7 +88,7 @@ load_admins()
 
 # ---------- Работа с пользователями ----------
 def get_user_by_username(username):
-    conn = sqlite3.connect('users.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT username, telegram_id, uuid, role, ban_expires, ban_reason FROM users WHERE username = ?', (username,))
     row = c.fetchone()
@@ -86,7 +97,7 @@ def get_user_by_username(username):
 
 def create_user(username, telegram_id):
     user_uuid = str(uuid.uuid4())
-    conn = sqlite3.connect('users.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     try:
         c.execute('INSERT INTO users (username, telegram_id, uuid, role, created_at) VALUES (?, ?, ?, ?, ?)',
@@ -99,7 +110,7 @@ def create_user(username, telegram_id):
         conn.close()
 
 def update_user_role(username, role, ban_expires=None, ban_reason=None):
-    conn = sqlite3.connect('users.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('UPDATE users SET role = ?, ban_expires = ?, ban_reason = ? WHERE username = ?',
               (role, ban_expires, ban_reason, username))
@@ -123,7 +134,7 @@ def is_user_banned(username):
 
 def store_code(username, code):
     expires = time.time() + 120
-    conn = sqlite3.connect('users.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('INSERT OR REPLACE INTO auth_codes (username, code, expires_at) VALUES (?, ?, ?)',
               (username, code, expires))
@@ -131,14 +142,14 @@ def store_code(username, code):
     conn.close()
 
 def verify_code(username, code):
-    conn = sqlite3.connect('users.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT expires_at FROM auth_codes WHERE username = ? AND code = ?', (username, code))
     row = c.fetchone()
     conn.close()
     if row is None or time.time() > row[0]:
         return False
-    conn = sqlite3.connect('users.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('DELETE FROM auth_codes WHERE username = ? AND code = ?', (username, code))
     conn.commit()
@@ -146,7 +157,7 @@ def verify_code(username, code):
     return True
 
 def update_online(username, ip):
-    conn = sqlite3.connect('users.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('INSERT OR REPLACE INTO online_clients (username, last_seen, ip) VALUES (?, ?, ?)',
               (username, time.time(), ip))
@@ -154,7 +165,7 @@ def update_online(username, ip):
     conn.close()
 
 def get_online_list():
-    conn = sqlite3.connect('users.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     cutoff = time.time() - 120
     c.execute('DELETE FROM online_clients WHERE last_seen < ?', (cutoff,))
@@ -167,7 +178,41 @@ def get_online_list():
 def is_admin(telegram_id):
     return telegram_id in ADMIN_IDS
 
-# ---------- Обработчики бота ----------
+# ---------- Функции для работы со сборками ----------
+def get_build(name):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT name, url, version, hash, updated_at FROM builds WHERE name = ?', (name,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return {'name': row[0], 'url': row[1], 'version': row[2], 'hash': row[3], 'updated_at': row[4]}
+    return None
+
+def set_build(name, url, version, hash_val=None):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('INSERT OR REPLACE INTO builds (name, url, version, hash, updated_at) VALUES (?, ?, ?, ?, ?)',
+              (name, url, version, hash_val, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+def delete_build(name):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('DELETE FROM builds WHERE name = ?', (name,))
+    conn.commit()
+    conn.close()
+
+def list_builds():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT name, version, updated_at FROM builds ORDER BY name')
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+# ---------- Обработчики бота (асинхронные) ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Привет! Я бот для входа в GoidaCraft.\n"
@@ -201,7 +246,7 @@ async def bind(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Этот ник уже привязан к другому Telegram‑аккаунту.")
             return
         else:
-            conn = sqlite3.connect('users.db')
+            conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
             c.execute('UPDATE users SET telegram_id = ? WHERE username = ?', (telegram_id, username))
             conn.commit()
@@ -316,13 +361,73 @@ async def addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         await update.message.reply_text("❌ Telegram ID должен быть числом.")
         return
-    conn = sqlite3.connect('users.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('INSERT OR IGNORE INTO admins (telegram_id) VALUES (?)', (new_admin_id,))
     conn.commit()
     conn.close()
     load_admins()
     await update.message.reply_text(f"✅ Администратор {new_admin_id} добавлен.")
+
+# ---------- Команды для управления сборками ----------
+async def addbuild(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ У вас нет прав администратора.")
+        return
+    args = context.args
+    if len(args) < 3:
+        await update.message.reply_text("❌ Использование: /addbuild <название> <url> [версия]")
+        return
+    name = args[0]
+    url = args[1]
+    version = args[2] if len(args) > 2 else "1.0"
+    set_build(name, url, version, None)
+    await update.message.reply_text(f"✅ Сборка '{name}' добавлена (URL: {url}, версия: {version})")
+
+async def updatebuild(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ У вас нет прав администратора.")
+        return
+    args = context.args
+    if len(args) < 3:
+        await update.message.reply_text("❌ Использование: /updatebuild <название> <новый_url> [новая_версия]")
+        return
+    name = args[0]
+    url = args[1]
+    version = args[2] if len(args) > 2 else None
+    build = get_build(name)
+    if not build:
+        await update.message.reply_text(f"❌ Сборка '{name}' не найдена.")
+        return
+    if version is None:
+        version = build['version']
+    set_build(name, url, version, None)
+    await update.message.reply_text(f"✅ Сборка '{name}' обновлена (новый URL: {url}, версия: {version})")
+
+async def removebuild(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ У вас нет прав администратора.")
+        return
+    args = context.args
+    if len(args) < 1:
+        await update.message.reply_text("❌ Использование: /removebuild <название>")
+        return
+    name = args[0]
+    delete_build(name)
+    await update.message.reply_text(f"✅ Сборка '{name}' удалена.")
+
+async def listbuilds(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ У вас нет прав администратора.")
+        return
+    builds = list_builds()
+    if not builds:
+        await update.message.reply_text("📭 Сборок пока нет.")
+        return
+    msg = "📦 Доступные сборки:\n"
+    for name, version, updated_at in builds:
+        msg += f"• {name} (v{version}) — обновлена: {updated_at}\n"
+    await update.message.reply_text(msg)
 
 # ---------- Создание бота ----------
 application = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -335,10 +440,23 @@ application.add_handler(CommandHandler("unban", unban))
 application.add_handler(CommandHandler("online", online))
 application.add_handler(CommandHandler("shutdown", shutdown))
 application.add_handler(CommandHandler("addadmin", addadmin))
+application.add_handler(CommandHandler("addbuild", addbuild))
+application.add_handler(CommandHandler("updatebuild", updatebuild))
+application.add_handler(CommandHandler("removebuild", removebuild))
+application.add_handler(CommandHandler("listbuilds", listbuilds))
 
+def run_bot():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(application.run_polling())
+    except Exception as e:
+        logger.error(f"Bot polling error: {e}")
+    finally:
+        loop.close()
 
-def start_flask():
-    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+thread = threading.Thread(target=run_bot, daemon=True)
+thread.start()
 
 # ---------- Flask endpoints ----------
 @app.route('/api/request_code', methods=['POST'])
@@ -358,16 +476,8 @@ def request_code():
     code = str(secrets.randbelow(900000) + 100000)
     store_code(username, code)
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {
-            'chat_id': telegram_id,
-            'text': f"🔐 Ваш код для входа в GoidaCraft: `{code}`\n\nКод действителен 2 минуты.",
-            'parse_mode': 'Markdown'
-        }
-        resp = req.post(url, json=payload, timeout=5)
-        if resp.status_code != 200:
-            logger.error(f"Telegram API error: {resp.text}")
-            return jsonify({'success': False, 'error': 'Ошибка отправки кода в Telegram'}), 500
+        bot = Bot(token=TELEGRAM_TOKEN)
+        bot.send_message(chat_id=telegram_id, text=f"🔐 Ваш код для входа в GoidaCraft: `{code}`\n\nКод действителен 2 минуты.", parse_mode='Markdown')
     except Exception as e:
         logger.error(f"Send code exception: {e}")
         return jsonify({'success': False, 'error': 'Не удалось отправить код'}), 500
@@ -430,11 +540,23 @@ def online_list():
     clients = get_online_list()
     return jsonify({'online': [{'username': c[0], 'ip': c[1], 'last_seen': c[2]} for c in clients]})
 
-if __name__ == '__main__':
-    # Запускаем Flask в отдельном потоке
-    flask_thread = threading.Thread(target=start_flask, daemon=True)
-    flask_thread.start()
+# ---------- Новые API для сборок ----------
+@app.route('/api/get_build_info', methods=['GET'])
+def get_build_info():
+    name = request.args.get('name')
+    if not name:
+        return jsonify({'success': False, 'error': 'Укажите название сборки'}), 400
+    build = get_build(name)
+    if not build:
+        return jsonify({'success': False, 'error': 'Сборка не найдена'}), 404
+    return jsonify({'success': True, 'build': build})
 
-    # Бот работает в главном потоке (корректный asyncio)
-    logger.info("Starting bot polling in main thread...")
-    application.run_polling()  # синхронный метод, блокирует главный поток
+@app.route('/api/list_builds', methods=['GET'])
+def list_builds_api():
+    builds = list_builds()
+    return jsonify({'success': True, 'builds': [{'name': row[0], 'version': row[1]} for row in builds]})
+
+if __name__ == '__main__':
+    # Получаем порт из переменной окружения, по умолчанию 5000
+    port = int(os.getenv("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
