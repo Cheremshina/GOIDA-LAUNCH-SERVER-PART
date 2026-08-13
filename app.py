@@ -10,10 +10,9 @@ from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import threading
-import asyncio
 import requests as req
-from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Bot, Update
+from telegram.ext import Updater, CommandHandler, CallbackContext
 
 # ---------- Настройка логирования ----------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -58,7 +57,6 @@ def init_db():
         expires_at REAL,
         PRIMARY KEY (username, code)
     )''')
-    # Новая таблица для сборок
     c.execute('''CREATE TABLE IF NOT EXISTS builds (
         name TEXT PRIMARY KEY,
         url TEXT,
@@ -212,29 +210,29 @@ def list_builds():
     conn.close()
     return rows
 
-# ---------- Обработчики бота (асинхронные) ----------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+# ---------- Обработчики команд (синхронные) ----------
+def start(update: Update, context: CallbackContext):
+    update.message.reply_text(
         "👋 Привет! Я бот для входа в GoidaCraft.\n"
         "Чтобы привязать Telegram к игровому нику, отправь команду:\n"
         "/bind <твой_ник>\n\n"
         "Пример: /bind misha_6776"
     )
 
-async def getid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def getid(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     username = update.effective_user.username or "без username"
-    await update.message.reply_text(
+    update.message.reply_text(
         f"🆔 Ваш Telegram ID: `{user_id}`\n"
         f"👤 Ваш @username: @{username}",
         parse_mode='Markdown'
     )
 
-async def bind(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def bind(update: Update, context: CallbackContext):
     text = update.message.text
     parts = text.split()
     if len(parts) < 2:
-        await update.message.reply_text("❌ Укажи ник после команды. Пример: /bind misha_6776")
+        update.message.reply_text("❌ Укажи ник после команды. Пример: /bind misha_6776")
         return
     username = parts[1].strip()
     telegram_id = update.effective_user.id
@@ -243,7 +241,7 @@ async def bind(update: Update, context: ContextTypes.DEFAULT_TYPE):
     existing = get_user_by_username(username)
     if existing:
         if existing[1] is not None:
-            await update.message.reply_text("❌ Этот ник уже привязан к другому Telegram‑аккаунту.")
+            update.message.reply_text("❌ Этот ник уже привязан к другому Telegram‑аккаунту.")
             return
         else:
             conn = sqlite3.connect(DB_PATH)
@@ -251,25 +249,25 @@ async def bind(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c.execute('UPDATE users SET telegram_id = ? WHERE username = ?', (telegram_id, username))
             conn.commit()
             conn.close()
-            await update.message.reply_text(f"✅ Аккаунт {username} успешно привязан к Telegram!")
+            update.message.reply_text(f"✅ Аккаунт {username} успешно привязан к Telegram!")
             return
     else:
         user_uuid = create_user(username, telegram_id)
         if user_uuid:
-            await update.message.reply_text(
+            update.message.reply_text(
                 f"✅ Новый аккаунт {username} создан и привязан к Telegram!\n"
                 f"Теперь ты можешь входить в лаунчер, запрашивая код."
             )
         else:
-            await update.message.reply_text("❌ Ошибка создания аккаунта. Возможно, ник уже занят.")
+            update.message.reply_text("❌ Ошибка создания аккаунта. Возможно, ник уже занят.")
 
-async def setrole(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def setrole(update: Update, context: CallbackContext):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ У вас нет прав администратора.")
+        update.message.reply_text("⛔ У вас нет прав администратора.")
         return
     args = context.args
     if len(args) < 2:
-        await update.message.reply_text("❌ Использование: /setrole <ник> <роль> [срок_бана_в_секундах]")
+        update.message.reply_text("❌ Использование: /setrole <ник> <роль> [срок_бана_в_секундах]")
         return
     username = args[0]
     role = args[1].lower()
@@ -282,84 +280,84 @@ async def setrole(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ban_expires = time.time() + seconds
                 ban_reason = ' '.join(args[3:]) if len(args) > 3 else 'Нарушение правил'
             except:
-                await update.message.reply_text("❌ Неверный формат времени (секунды).")
+                update.message.reply_text("❌ Неверный формат времени (секунды).")
                 return
         else:
             ban_expires = None
             ban_reason = 'Бессрочный бан'
     user = get_user_by_username(username)
     if not user:
-        await update.message.reply_text("❌ Пользователь не найден.")
+        update.message.reply_text("❌ Пользователь не найден.")
         return
     update_user_role(username, role, ban_expires, ban_reason)
-    await update.message.reply_text(f"✅ Роль {username} изменена на {role}.")
+    update.message.reply_text(f"✅ Роль {username} изменена на {role}.")
 
-async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def ban(update: Update, context: CallbackContext):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ У вас нет прав администратора.")
+        update.message.reply_text("⛔ У вас нет прав администратора.")
         return
     args = context.args
     if len(args) < 1:
-        await update.message.reply_text("❌ Использование: /ban <ник> [причина]")
+        update.message.reply_text("❌ Использование: /ban <ник> [причина]")
         return
     username = args[0]
     reason = ' '.join(args[1:]) if len(args) > 1 else 'Нарушение правил'
     user = get_user_by_username(username)
     if not user:
-        await update.message.reply_text("❌ Пользователь не найден.")
+        update.message.reply_text("❌ Пользователь не найден.")
         return
     update_user_role(username, 'banned', None, reason)
-    await update.message.reply_text(f"✅ Игрок {username} забанен. Причина: {reason}")
+    update.message.reply_text(f"✅ Игрок {username} забанен. Причина: {reason}")
 
-async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def unban(update: Update, context: CallbackContext):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ У вас нет прав администратора.")
+        update.message.reply_text("⛔ У вас нет прав администратора.")
         return
     args = context.args
     if len(args) < 1:
-        await update.message.reply_text("❌ Использование: /unban <ник>")
+        update.message.reply_text("❌ Использование: /unban <ник>")
         return
     username = args[0]
     user = get_user_by_username(username)
     if not user:
-        await update.message.reply_text("❌ Пользователь не найден.")
+        update.message.reply_text("❌ Пользователь не найден.")
         return
     update_user_role(username, 'player', None, None)
-    await update.message.reply_text(f"✅ Игрок {username} разбанен.")
+    update.message.reply_text(f"✅ Игрок {username} разбанен.")
 
-async def online(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def online(update: Update, context: CallbackContext):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ У вас нет прав администратора.")
+        update.message.reply_text("⛔ У вас нет прав администратора.")
         return
     clients = get_online_list()
     if not clients:
-        await update.message.reply_text("📭 В данный момент никто не онлайн.")
+        update.message.reply_text("📭 В данный момент никто не онлайн.")
         return
     msg = "🟢 Онлайн клиенты:\n"
     for username, ip, last_seen in clients:
         msg += f"• {username} (IP: {ip}, last ping: {datetime.fromtimestamp(last_seen).strftime('%H:%M:%S')})\n"
-    await update.message.reply_text(msg)
+    update.message.reply_text(msg)
 
-async def shutdown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def shutdown(update: Update, context: CallbackContext):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ У вас нет прав администратора.")
+        update.message.reply_text("⛔ У вас нет прав администратора.")
         return
-    await update.message.reply_text("🛑 Сервер и бот отключаются...")
+    update.message.reply_text("🛑 Сервер и бот отключаются...")
     logger.info("Shutdown initiated by admin.")
     os._exit(0)
 
-async def addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def addadmin(update: Update, context: CallbackContext):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ У вас нет прав администратора.")
+        update.message.reply_text("⛔ У вас нет прав администратора.")
         return
     args = context.args
     if len(args) < 1:
-        await update.message.reply_text("❌ Использование: /addadmin <telegram_id>")
+        update.message.reply_text("❌ Использование: /addadmin <telegram_id>")
         return
     try:
         new_admin_id = int(args[0])
     except:
-        await update.message.reply_text("❌ Telegram ID должен быть числом.")
+        update.message.reply_text("❌ Telegram ID должен быть числом.")
         return
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -367,93 +365,88 @@ async def addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
     load_admins()
-    await update.message.reply_text(f"✅ Администратор {new_admin_id} добавлен.")
+    update.message.reply_text(f"✅ Администратор {new_admin_id} добавлен.")
 
 # ---------- Команды для управления сборками ----------
-async def addbuild(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def addbuild(update: Update, context: CallbackContext):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ У вас нет прав администратора.")
+        update.message.reply_text("⛔ У вас нет прав администратора.")
         return
     args = context.args
     if len(args) < 3:
-        await update.message.reply_text("❌ Использование: /addbuild <название> <url> [версия]")
+        update.message.reply_text("❌ Использование: /addbuild <название> <url> [версия]")
         return
     name = args[0]
     url = args[1]
     version = args[2] if len(args) > 2 else "1.0"
     set_build(name, url, version, None)
-    await update.message.reply_text(f"✅ Сборка '{name}' добавлена (URL: {url}, версия: {version})")
+    update.message.reply_text(f"✅ Сборка '{name}' добавлена (URL: {url}, версия: {version})")
 
-async def updatebuild(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def updatebuild(update: Update, context: CallbackContext):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ У вас нет прав администратора.")
+        update.message.reply_text("⛔ У вас нет прав администратора.")
         return
     args = context.args
     if len(args) < 3:
-        await update.message.reply_text("❌ Использование: /updatebuild <название> <новый_url> [новая_версия]")
+        update.message.reply_text("❌ Использование: /updatebuild <название> <новый_url> [новая_версия]")
         return
     name = args[0]
     url = args[1]
     version = args[2] if len(args) > 2 else None
     build = get_build(name)
     if not build:
-        await update.message.reply_text(f"❌ Сборка '{name}' не найдена.")
+        update.message.reply_text(f"❌ Сборка '{name}' не найдена.")
         return
     if version is None:
         version = build['version']
     set_build(name, url, version, None)
-    await update.message.reply_text(f"✅ Сборка '{name}' обновлена (новый URL: {url}, версия: {version})")
+    update.message.reply_text(f"✅ Сборка '{name}' обновлена (новый URL: {url}, версия: {version})")
 
-async def removebuild(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def removebuild(update: Update, context: CallbackContext):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ У вас нет прав администратора.")
+        update.message.reply_text("⛔ У вас нет прав администратора.")
         return
     args = context.args
     if len(args) < 1:
-        await update.message.reply_text("❌ Использование: /removebuild <название>")
+        update.message.reply_text("❌ Использование: /removebuild <название>")
         return
     name = args[0]
     delete_build(name)
-    await update.message.reply_text(f"✅ Сборка '{name}' удалена.")
+    update.message.reply_text(f"✅ Сборка '{name}' удалена.")
 
-async def listbuilds(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def listbuilds(update: Update, context: CallbackContext):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ У вас нет прав администратора.")
+        update.message.reply_text("⛔ У вас нет прав администратора.")
         return
     builds = list_builds()
     if not builds:
-        await update.message.reply_text("📭 Сборок пока нет.")
+        update.message.reply_text("📭 Сборок пока нет.")
         return
     msg = "📦 Доступные сборки:\n"
     for name, version, updated_at in builds:
         msg += f"• {name} (v{version}) — обновлена: {updated_at}\n"
-    await update.message.reply_text(msg)
+    update.message.reply_text(msg)
 
-# ---------- Создание бота ----------
-application = Application.builder().token(TELEGRAM_TOKEN).build()
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("getid", getid))
-application.add_handler(CommandHandler("bind", bind))
-application.add_handler(CommandHandler("setrole", setrole))
-application.add_handler(CommandHandler("ban", ban))
-application.add_handler(CommandHandler("unban", unban))
-application.add_handler(CommandHandler("online", online))
-application.add_handler(CommandHandler("shutdown", shutdown))
-application.add_handler(CommandHandler("addadmin", addadmin))
-application.add_handler(CommandHandler("addbuild", addbuild))
-application.add_handler(CommandHandler("updatebuild", updatebuild))
-application.add_handler(CommandHandler("removebuild", removebuild))
-application.add_handler(CommandHandler("listbuilds", listbuilds))
-
+# ---------- Создание и запуск бота (синхронный Updater) ----------
 def run_bot():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(application.run_polling())
-    except Exception as e:
-        logger.error(f"Bot polling error: {e}")
-    finally:
-        loop.close()
+    updater = Updater(TELEGRAM_TOKEN, use_context=True)
+    dp = updater.dispatcher
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("getid", getid))
+    dp.add_handler(CommandHandler("bind", bind))
+    dp.add_handler(CommandHandler("setrole", setrole))
+    dp.add_handler(CommandHandler("ban", ban))
+    dp.add_handler(CommandHandler("unban", unban))
+    dp.add_handler(CommandHandler("online", online))
+    dp.add_handler(CommandHandler("shutdown", shutdown))
+    dp.add_handler(CommandHandler("addadmin", addadmin))
+    dp.add_handler(CommandHandler("addbuild", addbuild))
+    dp.add_handler(CommandHandler("updatebuild", updatebuild))
+    dp.add_handler(CommandHandler("removebuild", removebuild))
+    dp.add_handler(CommandHandler("listbuilds", listbuilds))
+
+    updater.start_polling()
+    updater.idle()  # блокирует поток до остановки
 
 thread = threading.Thread(target=run_bot, daemon=True)
 thread.start()
@@ -540,7 +533,7 @@ def online_list():
     clients = get_online_list()
     return jsonify({'online': [{'username': c[0], 'ip': c[1], 'last_seen': c[2]} for c in clients]})
 
-# ---------- Новые API для сборок ----------
+# ---------- API для сборок ----------
 @app.route('/api/get_build_info', methods=['GET'])
 def get_build_info():
     name = request.args.get('name')
@@ -557,6 +550,5 @@ def list_builds_api():
     return jsonify({'success': True, 'builds': [{'name': row[0], 'version': row[1]} for row in builds]})
 
 if __name__ == '__main__':
-    # Получаем порт из переменной окружения, по умолчанию 5000
     port = int(os.getenv("PORT", 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
