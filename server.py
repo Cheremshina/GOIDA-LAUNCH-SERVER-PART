@@ -7,10 +7,11 @@ import sqlite3
 import requests
 import secrets
 import hashlib
+from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from database import (
-    init_db, get_user_by_username, is_user_banned, store_code,
+    DB_PATH, init_db, get_user_by_username, is_user_banned, store_code,
     verify_code, update_online, get_online_list, get_build, list_builds,
     load_admins, create_user, update_user_role, set_build, delete_build
 )
@@ -18,7 +19,6 @@ from database import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------- Настройки ----------
 app = Flask(__name__)
 CORS(app)
 init_db()
@@ -29,6 +29,9 @@ if 5287355502 not in ADMIN_IDS:
     ADMIN_IDS.append(5287355502)
 
 API_URL = f"https://api.telegram.org/bot{TOKEN}"
+
+# Глобальная переменная для управления циклом бота
+bot_running = True
 
 # ---------- Flask endpoints (все те же, что были в app.py) ----------
 @app.route('/api/request_code', methods=['POST'])
@@ -135,7 +138,7 @@ def list_builds_api():
     builds = list_builds()
     return jsonify({'success': True, 'builds': [{'name': row[0], 'version': row[1]} for row in builds]})
 
-# ---------- Функции бота (из bot.py) ----------
+# ---------- Функции бота ----------
 def is_admin(telegram_id):
     return telegram_id in ADMIN_IDS
 
@@ -167,6 +170,7 @@ def get_updates(offset=None):
     return []
 
 def process_command(update):
+    global bot_running
     message = update.get("message")
     if not message:
         return
@@ -181,7 +185,6 @@ def process_command(update):
     parts = text.split()
     command = parts[0].lower() if parts else ""
 
-    # Обработка команд (полный набор из bot.py)
     if command == "/start":
         send_message(chat_id, "👋 Привет! Я бот для входа в GoidaCraft.\n"
                               "Чтобы привязать Telegram к игровому нику, отправь команду:\n"
@@ -348,12 +351,18 @@ def process_command(update):
             return
         send_message(chat_id, "🛑 Бот отключается...")
         logger.info("Bot shutdown initiated by admin.")
-        os._exit(0)
+        bot_running = False
 
 def bot_loop():
-    last_update_id = 0
+    global bot_running
+    # Игнорируем старые обновления
+    initial_updates = get_updates()
+    if initial_updates:
+        last_update_id = initial_updates[-1]['update_id']
+    else:
+        last_update_id = 0
     logger.info("Бот запущен. Ожидание команд...")
-    while True:
+    while bot_running:
         try:
             updates = get_updates(offset=last_update_id + 1)
             for update in updates:
@@ -363,6 +372,7 @@ def bot_loop():
             logger.error(f"Ошибка в основном цикле бота: {e}")
             time.sleep(5)
         time.sleep(1)
+    logger.info("Цикл бота завершён.")
 
 # ---------- Запуск ----------
 if __name__ == "__main__":
